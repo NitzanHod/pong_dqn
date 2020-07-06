@@ -4,7 +4,7 @@ import torch.optim as optim
 from dqn_model import DQN
 from dqn_learn import OptimizerSpec, dqn_learing
 from utils.gym import get_env, get_wrapper_by_name
-from utils.schedule import LinearSchedule
+from utils.schedule import LinearSchedule, PiecewiseSchedule
 
 BATCH_SIZE = 32
 GAMMA = 0.99
@@ -29,7 +29,7 @@ def main(env, num_timesteps):
         kwargs=dict(lr=LEARNING_RATE, alpha=ALPHA, eps=EPS),
     )
 
-    exploration_schedule = LinearSchedule(1000000, 0.1)
+    exploration_schedule = LinearSchedule(1000000, 0.01)
 
     dqn_learing(
         env=env,

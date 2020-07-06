@@ -20,11 +20,13 @@ from utils.gym import get_wrapper_by_name
 USE_CUDA = torch.cuda.is_available()
 dtype = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.FloatTensor
 
+
 class Variable(autograd.Variable):
     def __init__(self, data, *args, **kwargs):
         if USE_CUDA:
             data = data.cuda()
         super(Variable, self).__init__(data, *args, **kwargs)
+
 
 """
     OptimizerSpec containing following attributes
@@ -38,21 +40,21 @@ Statistic = {
     "best_mean_episode_rewards": []
 }
 
-def dqn_learing(
-    env,
-    q_func,
-    optimizer_spec,
-    exploration,
-    stopping_criterion=None,
-    replay_buffer_size=1000000,
-    batch_size=32,
-    gamma=0.99,
-    learning_starts=50000,
-    learning_freq=4,
-    frame_history_len=4,
-    target_update_freq=10000
-    ):
 
+def dqn_learing(
+        env,
+        q_func,
+        optimizer_spec,
+        exploration,
+        stopping_criterion=None,
+        replay_buffer_size=1000000,
+        batch_size=32,
+        gamma=0.99,
+        learning_starts=50000,
+        learning_freq=4,
+        frame_history_len=4,
+        target_update_freq=10000
+):
     """Run Deep Q-learning algorithm.
 
     You can specify your own convnet using q_func.
@@ -95,7 +97,7 @@ def dqn_learing(
         each update to the target Q network
     """
     assert type(env.observation_space) == gym.spaces.Box
-    assert type(env.action_space)      == gym.spaces.Discrete
+    assert type(env.action_space) == gym.spaces.Discrete
 
     ###############
     # BUILD MODEL #
@@ -116,7 +118,8 @@ def dqn_learing(
         if sample > eps_threshold:
             obs = torch.from_numpy(obs).type(dtype).unsqueeze(0) / 255.0
             # Use volatile = True if variable is only used in inference mode, i.e. don’t save the history
-            return model(Variable(obs, volatile=True)).data.max(1)[1].cpu()
+            with torch.no_grad():
+                return model(Variable(obs)).data.max(1)[1].cpu()
         else:
             return torch.IntTensor([[random.randrange(num_actions)]])
 
@@ -126,7 +129,8 @@ def dqn_learing(
     # YOUR CODE HERE
 
     ######
-
+    Q = q_func(input_arg, num_actions).to('cuda:0')
+    target_Q = q_func(input_arg, num_actions).to('cuda:0')
 
     # Construct Q network optimizer function
     optimizer = optimizer_spec.constructor(Q.parameters(), **optimizer_spec.kwargs)
@@ -183,6 +187,21 @@ def dqn_learing(
 
         #####
 
+        idx = replay_buffer.store_frame(last_obs)
+
+        encoded_obs = replay_buffer.encode_recent_observation()
+
+        action = select_epilson_greedy_action(model=Q, obs=encoded_obs, t=t)
+
+        obs, rew, done, info = env.step(action)
+
+        last_obs = obs
+
+        replay_buffer.store_effect(idx, action, rew, done)
+
+        if done:
+            last_obs = env.reset()
+
         # at this point, the environment should have been advanced one step (and
         # reset if done was true), and last_obs should point to the new latest
         # observation
@@ -194,6 +213,7 @@ def dqn_learing(
         if (t > learning_starts and
                 t % learning_freq == 0 and
                 replay_buffer.can_sample(batch_size)):
+            pass
             # Here, you should perform training. Training consists of four steps:
             # 3.a: use the replay buffer to sample a batch of transitions (see the
             # replay buffer code for function definition, each batch that you sample
@@ -220,6 +240,42 @@ def dqn_learing(
             # YOUR CODE HERE
 
             #####
+            # 3.a sample batch
+            obs_batch, act_batch, rew_batch, next_obs_batch, done_mask = replay_buffer.sample(batch_size)
+            obs_batch, act_batch, rew_batch, next_obs_batch, done_mask = \
+                torch.from_numpy(obs_batch).to('cuda:0').type(dtype), \
+                torch.from_numpy(act_batch).to('cuda:0').type(torch.cuda.LongTensor), \
+                torch.from_numpy(rew_batch).to('cuda:0').type(dtype), \
+                torch.from_numpy(next_obs_batch).to('cuda:0').type(dtype), \
+                torch.from_numpy(done_mask).to('cuda:0')
+
+            # 3.b bellman error
+            non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
+                                                    next_obs_batch)), device='cuda:0', dtype=torch.bool)
+            non_final_next_states = torch.cat([s.unsqueeze(0) for s in next_obs_batch
+                                               if s is not None])
+            #current_q_values.shape, next_obs_batch.shape, non_final_mask.shape, non_final_next_states.shape
+            current_q_values = Q(obs_batch).gather(1, act_batch.unsqueeze(1))
+            next_state_values = torch.zeros(batch_size, device='cuda:0')
+            next_state_values[non_final_mask] = target_Q(non_final_next_states).max(1)[0].detach()
+
+            # Compute the expected Q values
+            expected_state_action_values = (next_state_values * gamma) + rew_batch
+
+            # Compute absolute difference + clipping
+            loss = expected_state_action_values.unsqueeze(1) - current_q_values
+
+            # 3.c optimize
+            optimizer.zero_grad()
+            current_q_values.backward(loss.data)
+            num_param_updates += 1
+            # Clipping
+            for param in Q.parameters():
+                param.grad.data.clamp_(-1, 1)
+
+            #3.d update target network
+            if num_param_updates % target_update_freq == 0:
+                target_Q.load_state_dict(Q.state_dict())
 
         ### 4. Log progress and keep track of statistics
         episode_rewards = get_wrapper_by_name(env, "Monitor").get_episode_rewards()
